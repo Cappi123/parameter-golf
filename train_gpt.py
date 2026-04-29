@@ -369,13 +369,18 @@ def eval_val_sliding(h,device,val_data,base_model,batch_seqs=32):
         base_model.train();return _loss_bpb(loss_sum,token_count,byte_count)
 def inject_lora(model, rank=8):
     log("Injecting LoRA adapters for TTT...")
-    for layer in model.modules():
-        if isinstance(layer, CausalSelfAttention):
-            layer.q_proj = CastedLoRALinear(layer.q_proj, rank=rank)
-            layer.v_proj = CastedLoRALinear(layer.v_proj, rank=rank)
+    for block in model.modules():
+        if isinstance(block, CausalSelfAttention):
+            block.q_proj = CastedLoRALinear(block.q_proj, rank=rank)
+            block.k_proj = CastedLoRALinear(block.k_proj, rank=rank)
+            block.v_proj = CastedLoRALinear(block.v_proj, rank=rank)
+            block.o_proj = CastedLoRALinear(block.o_proj, rank=rank)
+        if isinstance(block, MLP):
+            block.fc1 = CastedLoRALinear(block.fc1, rank=rank)
+            block.fc2 = CastedLoRALinear(block.fc2, rank=rank)
     return model
 def eval_val_ttt(h,device,val_data,base_model,batch_seqs=32):
-        base_model = inject_lora(base_model, rank=8)
+        base_model = inject_lora(base_model, rank=16)
         lora_params = []
         for name, p in base_model.named_parameters():
             if 'lora_' in name:

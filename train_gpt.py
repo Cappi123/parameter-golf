@@ -59,7 +59,7 @@ class ShuffledSequenceLoader:
         def next_batch(self,train_batch_tokens,grad_accum_steps):
                 h=self.h;device=self.device;shard_idx=random.randint(0,len(self.shards)-1);tokens=self.shards[shard_idx][1]
                 while True:
-                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
+                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps//self.world_size;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
                         x_chunks=[tokens[s:s+h.train_seq_len]for s in starts];y_chunks=[tokens[s+1:s+h.train_seq_len+1]for s in starts]
                         if not x_chunks:continue
                         x=torch.stack(x_chunks).to(dtype=torch.int64,device=device,non_blocking=True);y=torch.stack(y_chunks).to(dtype=torch.int64,device=device,non_blocking=True);return x,y

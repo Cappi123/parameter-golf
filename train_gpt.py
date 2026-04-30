@@ -59,7 +59,7 @@ class ShuffledSequenceLoader:
         def next_batch(self,train_batch_tokens,grad_accum_steps):
                 h=self.h;device=self.device;shard_idx=random.randint(0,len(self.shards)-1);tokens=self.shards[shard_idx][1]
                 while True:
-                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps//self.world_size;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
+                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
                         x_chunks=[tokens[s:s+h.train_seq_len]for s in starts];y_chunks=[tokens[s+1:s+h.train_seq_len+1]for s in starts]
                         if not x_chunks:continue
                         x=torch.stack(x_chunks).to(dtype=torch.int64,device=device,non_blocking=True);y=torch.stack(y_chunks).to(dtype=torch.int64,device=device,non_blocking=True);return x,y
@@ -429,7 +429,7 @@ def eval_val_ttt(h,device,val_data,base_model,batch_seqs=32):
 def timed_eval(label,fn,*args,**kwargs):torch.cuda.synchronize();t0=time.perf_counter();val_loss,val_bpb=fn(*args,**kwargs);torch.cuda.synchronize();elapsed_ms=1e3*(time.perf_counter()-t0);log(f"{label} val_loss:{val_loss:.8f} val_bpb:{val_bpb:.8f} eval_time:{elapsed_ms:.0f}ms");return val_loss,val_bpb
 def train_model(h,device,val_data):
         base_model=GPT(h).to(device).bfloat16();restore_fp32_params(base_model);compiled_model=torch.compile(base_model,dynamic=False,fullgraph=True)
-        if h.distributed:model=DDP(compiled_model,device_ids=[h.local_rank],broadcast_buffers=False,find_unused_parameters=True)
+        if h.distributed:model=DDP(compiled_model,device_ids=[h.local_rank],broadcast_buffers=False)
         else:model=compiled_model
         log(f"model_params:{sum(p.numel()for p in base_model.parameters())}");optimizers=Optimizers(h,base_model);train_loader=ShuffledSequenceLoader(h,device);max_wallclock_ms=1e3*h.max_wallclock_seconds if h.max_wallclock_seconds>0 else None
         if max_wallclock_ms is not None:max_wallclock_ms-=h.gptq_reserve_seconds*1e3;log(f"gptq:reserving {h.gptq_reserve_seconds:.0f}s, effective={max_wallclock_ms:.0f}ms")

@@ -52,15 +52,23 @@ class ShuffledSequenceLoader:
                 self.h=h;self.device=device;self.epoch=0
                 if not h.distributed or h.world_size==1:self.rank,self.world_size=0,1
                 else:self.rank,self.world_size=h.rank,h.world_size
-                train_files=sorted(glob.glob(h.train_files))
-                if not train_files:raise FileNotFoundError(f"No training files found at {h.train_files}")
-                self.shards=[(f,load_data_shard(Path(f)))for f in train_files]
-                self.total_tokens=sum(s[1].numel()for s in self.shards);log(f"loader:total_tokens={self.total_tokens} from {len(self.shards)} shards")
+                self.header_bytes=256*np.dtype('<i4').itemsize;self.token_dtype=np.dtype('<u2')
+                self.train_files=[Path(p)for p in sorted(glob.glob(h.train_files))]
+                if not self.train_files:raise FileNotFoundError(f"No training files found at {h.train_files}")
+                self.shard_lengths=[];self.shards=[]
+                for file in self.train_files:
+                        header=np.fromfile(file,dtype='<i4',count=256)
+                        if header.size!=256 or int(header[0])!=20240520 or int(header[1])!=1:raise ValueError(f"Unexpected shard header for {file}")
+                        num_tokens=int(header[2]);expected_size=self.header_bytes+num_tokens*self.token_dtype.itemsize
+                        if file.stat().st_size!=expected_size:raise ValueError(f"Shard size mismatch in {file}: expected {expected_size}, got {file.stat().st_size}")
+                        self.shard_lengths.append(num_tokens);self.shards.append((file,num_tokens))
+                self.total_tokens=sum(self.shard_lengths);log(f"loader:total_tokens={self.total_tokens} from {len(self.shards)} shards")
         def next_batch(self,train_batch_tokens,grad_accum_steps):
-                h=self.h;device=self.device;shard_idx=random.randint(0,len(self.shards)-1);tokens=self.shards[shard_idx][1]
+                h=self.h;device=self.device;shard_idx=random.randint(0,len(self.shards)-1);shard_file,num_tokens=self.shards[shard_idx]
+                tokens=np.memmap(shard_file,dtype=self.token_dtype,mode='r',offset=self.header_bytes,shape=(num_tokens,))
                 while True:
-                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps//self.world_size;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
-                        x_chunks=[tokens[s:s+h.train_seq_len]for s in starts];y_chunks=[tokens[s+1:s+h.train_seq_len+1]for s in starts]
+                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps//self.world_size;starts=np.random.randint(0,num_tokens-h.train_seq_len-1,size=(num_seqs,))
+                        x_chunks=[torch.from_numpy(np.asarray(tokens[s:s+h.train_seq_len],dtype=np.int32))for s in starts];y_chunks=[torch.from_numpy(np.asarray(tokens[s+1:s+h.train_seq_len+1],dtype=np.int32))for s in starts]
                         if not x_chunks:continue
                         x=torch.stack(x_chunks).to(dtype=torch.int64,device=device,non_blocking=True);y=torch.stack(y_chunks).to(dtype=torch.int64,device=device,non_blocking=True);return x,y
 class RMSNorm(nn.Module):

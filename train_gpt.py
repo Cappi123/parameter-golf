@@ -59,7 +59,7 @@ class ShuffledSequenceLoader:
         def next_batch(self,train_batch_tokens,grad_accum_steps):
                 h=self.h;device=self.device;shard_idx=random.randint(0,len(self.shards)-1);tokens=self.shards[shard_idx][1]
                 while True:
-                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
+                        num_seqs=train_batch_tokens//h.train_seq_len//grad_accum_steps//self.world_size;starts=torch.randint(0,tokens.numel()-h.train_seq_len-1,(num_seqs,))
                         x_chunks=[tokens[s:s+h.train_seq_len]for s in starts];y_chunks=[tokens[s+1:s+h.train_seq_len+1]for s in starts]
                         if not x_chunks:continue
                         x=torch.stack(x_chunks).to(dtype=torch.int64,device=device,non_blocking=True);y=torch.stack(y_chunks).to(dtype=torch.int64,device=device,non_blocking=True);return x,y
@@ -129,9 +129,14 @@ class CausalSelfAttention(nn.Module):
                 if not is_xsa_layer:k=self.apply_rotary_emb(k.unflatten(-1,(self.num_kv_heads,self.head_dim)),rope_cache).transpose(1,2)
                 else:k=k.unflatten(-1,(self.num_kv_heads,self.head_dim)).transpose(1,2)
                 v=v.unflatten(-1,(self.num_kv_heads,self.head_dim)).transpose(1,2)
-                if self.num_kv_heads!=self.num_heads:k=k.repeat_interleave(self.num_heads//self.num_kv_heads,dim=1);v=v.repeat_interleave(self.num_heads//self.num_kv_heads,dim=1)
-                y=F.scaled_dot_product_attention(q.contiguous(),k.contiguous(),v.contiguous(),is_causal=True)
-                y=y.transpose(1,2).flatten(-2);return self.o_proj(y)
+                if HAS_FA3:
+                        y=flash_attn_3_func(q.transpose(1,2).contiguous(),k.transpose(1,2).contiguous(),v.transpose(1,2).contiguous(),causal=True)
+                        y=y.flatten(-2)
+                else:
+                        if self.num_kv_heads!=self.num_heads:k=k.repeat_interleave(self.num_heads//self.num_kv_heads,dim=1);v=v.repeat_interleave(self.num_heads//self.num_kv_heads,dim=1)
+                        y=F.scaled_dot_product_attention(q.contiguous(),k.contiguous(),v.contiguous(),is_causal=True)
+                        y=y.transpose(1,2).flatten(-2)
+                return self.o_proj(y)
 class MLP(nn.Module):
         def __init__(self,dim,hidden_mult,act_fn=LeakySquared(.5)):
                 super().__init__();hidden_dim=int(hidden_mult*dim);self.fc1=CastedLinear(dim,hidden_dim);self.fc2=CastedLinear(hidden_dim,dim);self.act=act_fn
@@ -429,7 +434,7 @@ def eval_val_ttt(h,device,val_data,base_model,batch_seqs=32):
 def timed_eval(label,fn,*args,**kwargs):torch.cuda.synchronize();t0=time.perf_counter();val_loss,val_bpb=fn(*args,**kwargs);torch.cuda.synchronize();elapsed_ms=1e3*(time.perf_counter()-t0);log(f"{label} val_loss:{val_loss:.8f} val_bpb:{val_bpb:.8f} eval_time:{elapsed_ms:.0f}ms");return val_loss,val_bpb
 def train_model(h,device,val_data):
         base_model=GPT(h).to(device).bfloat16();restore_fp32_params(base_model);compiled_model=torch.compile(base_model,dynamic=False,fullgraph=True)
-        if h.distributed:model=DDP(compiled_model,device_ids=[h.local_rank],broadcast_buffers=False)
+        if h.distributed:model=DDP(compiled_model,device_ids=[h.local_rank],broadcast_buffers=False,find_unused_parameters=True)
         else:model=compiled_model
         log(f"model_params:{sum(p.numel()for p in base_model.parameters())}");optimizers=Optimizers(h,base_model);train_loader=ShuffledSequenceLoader(h,device);max_wallclock_ms=1e3*h.max_wallclock_seconds if h.max_wallclock_seconds>0 else None
         if max_wallclock_ms is not None:max_wallclock_ms-=h.gptq_reserve_seconds*1e3;log(f"gptq:reserving {h.gptq_reserve_seconds:.0f}s, effective={max_wallclock_ms:.0f}ms")
